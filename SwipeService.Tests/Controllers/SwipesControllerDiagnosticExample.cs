@@ -2,6 +2,7 @@ using Xunit;
 using Xunit.Abstractions;
 using Moq;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using MediatR;
 using SwipeService.Controllers;
@@ -12,6 +13,7 @@ using SwipeService.Commands;
 using SwipeService.Common;
 using SwipeService.Tests.TestHelpers;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
 
 namespace SwipeService.Tests.Controllers;
 
@@ -25,6 +27,7 @@ public class SwipesControllerDiagnosticExample : IDisposable
     private readonly Mock<MatchmakingNotifier> _mockNotifier;
     private readonly Mock<ILogger<SwipesController>> _mockLogger;
     private readonly Mock<IMediator> _mockMediator;
+    private readonly Mock<IUserProfileResolver> _mockResolver;
     private readonly SwipesController _controller;
     private readonly ITestOutputHelper _output;
 
@@ -41,7 +44,17 @@ public class SwipesControllerDiagnosticExample : IDisposable
         _mockNotifier = new Mock<MatchmakingNotifier>(mockHttpClient.Object);
         _mockLogger = new Mock<ILogger<SwipesController>>();
         _mockMediator = new Mock<IMediator>();
-        _controller = new SwipesController(_context, _mockNotifier.Object, _mockLogger.Object, _mockMediator.Object);
+        _mockResolver = new Mock<IUserProfileResolver>();
+        _mockResolver
+            .Setup(r => r.ResolveProfileIdAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(1);
+        _controller = new SwipesController(_context, _mockNotifier.Object, _mockLogger.Object, _mockMediator.Object, _mockResolver.Object);
+
+        var claims = new[] { new Claim("sub", "test-keycloak-1") };
+        var identity = new ClaimsIdentity(claims, "TestAuth");
+        var httpContext = new DefaultHttpContext { User = new ClaimsPrincipal(identity) };
+        httpContext.Request.Headers["Authorization"] = "Bearer test-token";
+        _controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
     }
 
     public void Dispose()

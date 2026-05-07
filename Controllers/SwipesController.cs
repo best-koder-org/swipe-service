@@ -19,24 +19,70 @@ namespace SwipeService.Controllers
         private readonly MatchmakingNotifier _notifier;
         private readonly ILogger<SwipesController> _logger;
         private readonly IMediator _mediator;
+        private readonly IUserProfileResolver _profileResolver;
 
-        public SwipesController(SwipeContext context, MatchmakingNotifier notifier, ILogger<SwipesController> logger, IMediator mediator)
+        public SwipesController(SwipeContext context, MatchmakingNotifier notifier, ILogger<SwipesController> logger, IMediator mediator, IUserProfileResolver profileResolver)
         {
             _context = context;
             _notifier = notifier;
             _logger = logger;
             _mediator = mediator;
+            _profileResolver = profileResolver;
         }
 
         // POST: Record a single swipe
         [HttpPost]
+        [Authorize]
         public async Task<IActionResult> Swipe([FromBody] SwipeRequest request)
         {
+            // Resolve the swiper's identity from the JWT.
+            // The legacy `UserId` body field is ignored when a JWT is present —
+            // this prevents callers from spoofing other users' swipes.
+            var keycloakId = User.FindFirst("sub")?.Value
+                          ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+            if (string.IsNullOrWhiteSpace(keycloakId))
+            {
+                return Unauthorized(ApiResponse<SwipeResponse>.FailureResult("Missing 'sub' claim in JWT"));
+            }
+
+            // Forward the caller's bearer token to UserService for profile lookup.
+            string? bearer = null;
+            if (Request.Headers.TryGetValue("Authorization", out var authHeader))
+            {
+                var raw = authHeader.ToString();
+                if (raw.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+                {
+                    bearer = raw.Substring("Bearer ".Length).Trim();
+                }
+            }
+            if (string.IsNullOrWhiteSpace(bearer))
+            {
+                return Unauthorized(ApiResponse<SwipeResponse>.FailureResult("Missing bearer token"));
+            }
+
+            var profileId = await _profileResolver.ResolveProfileIdAsync(keycloakId, bearer, HttpContext.RequestAborted);
+            if (profileId is null or 0)
+            {
+                return BadRequest(ApiResponse<SwipeResponse>.FailureResult("Could not resolve profile for caller"));
+            }
+
+            // Translate Direction → IsLike when the modern field is supplied.
+            var isLike = request.IsLike;
+            if (!string.IsNullOrWhiteSpace(request.Direction))
+            {
+                isLike = request.Direction.Trim().ToLowerInvariant() switch
+                {
+                    "like" or "superlike" or "super_like" => true,
+                    "pass" or "dislike" or "skip" => false,
+                    _ => request.IsLike,
+                };
+            }
+
             var command = new RecordSwipeCommand
             {
-                UserId = request.UserId,
+                UserId = profileId.Value,
                 TargetUserId = request.TargetUserId,
-                IsLike = request.IsLike,
+                IsLike = isLike,
                 IdempotencyKey = request.IdempotencyKey
             };
 

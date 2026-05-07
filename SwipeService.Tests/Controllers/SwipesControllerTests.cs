@@ -1,6 +1,7 @@
 using Xunit;
 using Moq;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using MediatR;
 using SwipeService.Controllers;
@@ -11,6 +12,7 @@ using SwipeService.Commands;
 using SwipeService.Queries;
 using SwipeService.Common;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
 using Match = SwipeService.Models.Match;
 
 namespace SwipeService.Tests.Controllers;
@@ -25,6 +27,7 @@ public class SwipesControllerTests : IDisposable
     private readonly Mock<MatchmakingNotifier> _mockNotifier;
     private readonly Mock<ILogger<SwipesController>> _mockLogger;
     private readonly Mock<IMediator> _mockMediator;
+    private readonly Mock<IUserProfileResolver> _mockResolver;
     private readonly SwipesController _controller;
 
     public SwipesControllerTests()
@@ -38,7 +41,20 @@ public class SwipesControllerTests : IDisposable
         _mockNotifier = new Mock<MatchmakingNotifier>(mockHttpClient.Object);
        _mockLogger = new Mock<ILogger<SwipesController>>();
         _mockMediator = new Mock<IMediator>();
-        _controller = new SwipesController(_context, _mockNotifier.Object, _mockLogger.Object, _mockMediator.Object);
+        _mockResolver = new Mock<IUserProfileResolver>();
+        // Default: any caller resolves to profileId=1 (the historical swiper used in these tests).
+        _mockResolver
+            .Setup(r => r.ResolveProfileIdAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(1);
+
+        _controller = new SwipesController(_context, _mockNotifier.Object, _mockLogger.Object, _mockMediator.Object, _mockResolver.Object);
+
+        // Authenticate the controller with a known sub claim + Authorization header.
+        var claims = new[] { new Claim("sub", "test-keycloak-1") };
+        var identity = new ClaimsIdentity(claims, "TestAuth");
+        var httpContext = new DefaultHttpContext { User = new ClaimsPrincipal(identity) };
+        httpContext.Request.Headers["Authorization"] = "Bearer test-token";
+        _controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
     }
 
     public void Dispose()
@@ -528,5 +544,95 @@ public class SwipesControllerTests : IDisposable
         var secondBadResult = Assert.IsType<BadRequestObjectResult>(secondResult);
         var secondApiResponse = Assert.IsType<ApiResponse<SwipeResponse>>(secondBadResult.Value);
         Assert.False(secondApiResponse.Success);
+    }
+
+    // ==================== JWT IDENTITY + DIRECTION TESTS (v0.1) ====================
+
+    [Fact]
+    public async Task Swipe_OverridesClientSuppliedUserId_WithJwtResolvedProfileId()
+    {
+        // Arrange — client tries to spoof another user's UserId in the body.
+        // The controller MUST ignore the body's UserId and use the resolver's profileId (1).
+        RecordSwipeCommand? captured = null;
+        _mockMediator
+            .Setup(m => m.Send(It.IsAny<RecordSwipeCommand>(), default))
+            .Callback<IRequest<Result<SwipeResponse>>, CancellationToken>((cmd, _) => captured = (RecordSwipeCommand)cmd)
+            .ReturnsAsync(Result<SwipeResponse>.Success(new SwipeResponse { Success = true }));
+
+        var spoofed = new SwipeRequest { UserId = 9999, TargetUserId = 2, IsLike = true };
+
+        // Act
+        var result = await _controller.Swipe(spoofed);
+
+        // Assert
+        Assert.IsType<OkObjectResult>(result);
+        Assert.NotNull(captured);
+        Assert.Equal(1, captured!.UserId); // resolver returned 1, body's 9999 ignored
+        Assert.Equal(2, captured.TargetUserId);
+    }
+
+    [Theory]
+    [InlineData("like", true)]
+    [InlineData("LIKE", true)]
+    [InlineData("superlike", true)]
+    [InlineData("super_like", true)]
+    [InlineData("pass", false)]
+    [InlineData("dislike", false)]
+    [InlineData("skip", false)]
+    public async Task Swipe_DirectionField_TakesPrecedenceOverIsLike(string direction, bool expectedIsLike)
+    {
+        // Arrange — Direction field is the modern Flutter contract. When supplied,
+        // it must override the legacy IsLike boolean.
+        RecordSwipeCommand? captured = null;
+        _mockMediator
+            .Setup(m => m.Send(It.IsAny<RecordSwipeCommand>(), default))
+            .Callback<IRequest<Result<SwipeResponse>>, CancellationToken>((cmd, _) => captured = (RecordSwipeCommand)cmd)
+            .ReturnsAsync(Result<SwipeResponse>.Success(new SwipeResponse { Success = true }));
+
+        // IsLike intentionally set to the opposite of the expected mapping
+        var request = new SwipeRequest { TargetUserId = 2, IsLike = !expectedIsLike, Direction = direction };
+
+        // Act
+        await _controller.Swipe(request);
+
+        // Assert
+        Assert.NotNull(captured);
+        Assert.Equal(expectedIsLike, captured!.IsLike);
+    }
+
+    [Fact]
+    public async Task Swipe_NoSubClaim_ReturnsUnauthorized()
+    {
+        // Arrange — strip JWT
+        _controller.ControllerContext.HttpContext.User = new ClaimsPrincipal(new ClaimsIdentity());
+
+        var request = new SwipeRequest { TargetUserId = 2, IsLike = true };
+
+        // Act
+        var result = await _controller.Swipe(request);
+
+        // Assert
+        Assert.IsType<UnauthorizedObjectResult>(result);
+    }
+
+    [Fact]
+    public async Task Swipe_ResolverReturnsNull_ReturnsBadRequest()
+    {
+        // Arrange — resolver fails to map keycloakId → profileId.
+        _mockResolver.Reset();
+        _mockResolver
+            .Setup(r => r.ResolveProfileIdAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((int?)null);
+
+        var request = new SwipeRequest { TargetUserId = 2, IsLike = true };
+
+        // Act
+        var result = await _controller.Swipe(request);
+
+        // Assert
+        var bad = Assert.IsType<BadRequestObjectResult>(result);
+        var resp = Assert.IsType<ApiResponse<SwipeResponse>>(bad.Value);
+        Assert.False(resp.Success);
+        Assert.Contains("profile", resp.Message ?? "", StringComparison.OrdinalIgnoreCase);
     }
 }

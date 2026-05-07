@@ -115,6 +115,15 @@ builder.Services.AddTransient<InternalApiKeyAuthHandler>();
 builder.Services.AddHttpClient<MatchmakingNotifier>()
     .AddHttpMessageHandler<InternalApiKeyAuthHandler>();
 
+// Register UserProfileResolver: HTTP-backed lookup keycloakId → profileId.
+// Base URL comes from configuration (UserService:BaseUrl), with localhost fallback.
+var userServiceBaseUrl = builder.Configuration["UserService:BaseUrl"] ?? "http://localhost:8082";
+builder.Services.AddHttpClient<IUserProfileResolver, UserProfileResolver>(client =>
+{
+    client.BaseAddress = new Uri(userServiceBaseUrl.TrimEnd('/') + "/");
+    client.Timeout = TimeSpan.FromSeconds(5);
+});
+
 // Add CQRS with MediatR
 builder.Services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(Assembly.GetExecutingAssembly()));
 

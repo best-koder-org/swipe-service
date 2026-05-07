@@ -4,14 +4,28 @@ namespace SwipeService.Models
 {
     public class SwipeRequest
     {
-        [Required]
+        /// <summary>
+        /// Legacy field. When the request is authenticated via JWT, this value is
+        /// ignored and overwritten with the profile id resolved from the JWT
+        /// <c>sub</c> claim. Kept for backwards compatibility with internal callers
+        /// (e.g. bot-service) that don't carry an end-user JWT.
+        /// </summary>
         public int UserId { get; set; }
 
         [Required]
         public int TargetUserId { get; set; }
 
-        [Required]
+        /// <summary>
+        /// Legacy boolean flag. Deserialized when the modern <see cref="Direction"/>
+        /// field is absent.
+        /// </summary>
         public bool IsLike { get; set; }
+
+        /// <summary>
+        /// Modern client contract: "like", "pass", "superlike". Case-insensitive.
+        /// When present, takes precedence over <see cref="IsLike"/>.
+        /// </summary>
+        public string? Direction { get; set; }
 
         /// <summary>
         /// Optional idempotency key for retry safety. If provided, duplicate requests with the same key

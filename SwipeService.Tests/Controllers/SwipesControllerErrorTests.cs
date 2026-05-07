@@ -1,6 +1,7 @@
 using Xunit;
 using Moq;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using MediatR;
 using SwipeService.Controllers;
@@ -11,6 +12,7 @@ using SwipeService.Commands;
 using SwipeService.Queries;
 using SwipeService.Common;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
 using Match = SwipeService.Models.Match;
 
 namespace SwipeService.Tests.Controllers;
@@ -25,6 +27,7 @@ public class SwipesControllerErrorTests : IDisposable
     private readonly Mock<MatchmakingNotifier> _mockNotifier;
     private readonly Mock<ILogger<SwipesController>> _mockLogger;
     private readonly Mock<IMediator> _mockMediator;
+    private readonly Mock<IUserProfileResolver> _mockResolver;
     private readonly SwipesController _controller;
 
     public SwipesControllerErrorTests()
@@ -38,7 +41,17 @@ public class SwipesControllerErrorTests : IDisposable
         _mockNotifier = new Mock<MatchmakingNotifier>(mockHttpClient.Object);
         _mockLogger = new Mock<ILogger<SwipesController>>();
         _mockMediator = new Mock<IMediator>();
-        _controller = new SwipesController(_context, _mockNotifier.Object, _mockLogger.Object, _mockMediator.Object);
+        _mockResolver = new Mock<IUserProfileResolver>();
+        _mockResolver
+            .Setup(r => r.ResolveProfileIdAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(1);
+        _controller = new SwipesController(_context, _mockNotifier.Object, _mockLogger.Object, _mockMediator.Object, _mockResolver.Object);
+
+        var claims = new[] { new Claim("sub", "test-keycloak-1") };
+        var identity = new ClaimsIdentity(claims, "TestAuth");
+        var httpContext = new DefaultHttpContext { User = new ClaimsPrincipal(identity) };
+        httpContext.Request.Headers["Authorization"] = "Bearer test-token";
+        _controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
     }
 
     public void Dispose()
@@ -388,43 +401,11 @@ public class SwipesControllerErrorTests : IDisposable
 
     // ==================== VALIDATION EDGE CASES ====================
 
-    [Fact]
-    public async Task Swipe_ZeroUserId_HandledByMediator()
-    {
-        // Arrange
-        _mockMediator
-            .Setup(m => m.Send(It.Is<RecordSwipeCommand>(c => c.UserId == 0), default))
-            .ReturnsAsync(Result<SwipeResponse>.Failure("Invalid user ID"));
-
-        var request = new SwipeRequest { UserId = 0, TargetUserId = 2, IsLike = true };
-
-        // Act
-        var result = await _controller.Swipe(request);
-
-        // Assert
-        var badRequestResult = Assert.IsType<BadRequestObjectResult>(result);
-        var apiResponse = Assert.IsType<ApiResponse<SwipeResponse>>(badRequestResult.Value);
-        Assert.False(apiResponse.Success);
-    }
-
-    [Fact]
-    public async Task Swipe_NegativeUserId_HandledByMediator()
-    {
-        // Arrange
-        _mockMediator
-            .Setup(m => m.Send(It.Is<RecordSwipeCommand>(c => c.UserId < 0), default))
-            .ReturnsAsync(Result<SwipeResponse>.Failure("Invalid user ID"));
-
-        var request = new SwipeRequest { UserId = -1, TargetUserId = 2, IsLike = true };
-
-        // Act
-        var result = await _controller.Swipe(request);
-
-        // Assert
-        var badRequestResult = Assert.IsType<BadRequestObjectResult>(result);
-        var apiResponse = Assert.IsType<ApiResponse<SwipeResponse>>(badRequestResult.Value);
-        Assert.False(apiResponse.Success);
-    }
+    // Note: tests for body-supplied UserId (zero/negative) were removed in v0.1.
+    // The body's UserId is now intentionally ignored — the swiper's identity is
+    // derived from the JWT 'sub' claim via IUserProfileResolver. See
+    // SwipesControllerTests.Swipe_OverridesClientSuppliedUserId_WithJwtResolvedProfileId
+    // and SwipesControllerTests.Swipe_ResolverReturnsNull_ReturnsBadRequest.
 
     [Fact]
     public async Task BatchSwipe_AllSelfSwipes_ReturnsAllErrors()
