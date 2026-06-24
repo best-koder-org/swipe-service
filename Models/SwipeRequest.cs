@@ -12,8 +12,14 @@ namespace SwipeService.Models
         /// </summary>
         public int UserId { get; set; }
 
+        /// <summary>
+        /// Target user's profile ID as a string. The Flutter client sends this value
+        /// as a string (e.g. "3") because the candidate list returns it that way.
+        /// The controller parses it to <c>int</c> before passing to the command handler.
+        /// Internal callers (bot-service) also send strings.
+        /// </summary>
         [Required]
-        public int TargetUserId { get; set; }
+        public string TargetUserId { get; set; } = string.Empty;
 
         /// <summary>
         /// Legacy boolean flag. Deserialized when the modern <see cref="Direction"/>
@@ -50,8 +56,11 @@ namespace SwipeService.Models
 
     public class SwipeAction
     {
+        /// <summary>
+        /// Target user's profile ID as a string. Parsed to <c>int</c> by the controller.
+        /// </summary>
         [Required]
-        public int TargetUserId { get; set; }
+        public string TargetUserId { get; set; } = string.Empty;
 
         [Required]
         public bool IsLike { get; set; }

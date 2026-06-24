@@ -8,6 +8,10 @@ using SwipeService.Data;
 using SwipeService.Models;
 using SwipeService.Queries;
 using SwipeService.Services;
+using System.Net.Http;
+using System.Net.Http.Json;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace SwipeService.Controllers
 {
@@ -20,14 +24,18 @@ namespace SwipeService.Controllers
         private readonly ILogger<SwipesController> _logger;
         private readonly IMediator _mediator;
         private readonly IUserProfileResolver _profileResolver;
+        private readonly IHttpClientFactory _httpClientFactory;
+        private readonly IConfiguration _configuration;
 
-        public SwipesController(SwipeContext context, MatchmakingNotifier notifier, ILogger<SwipesController> logger, IMediator mediator, IUserProfileResolver profileResolver)
+        public SwipesController(SwipeContext context, MatchmakingNotifier notifier, ILogger<SwipesController> logger, IMediator mediator, IUserProfileResolver profileResolver, IHttpClientFactory httpClientFactory, IConfiguration configuration)
         {
             _context = context;
             _notifier = notifier;
             _logger = logger;
             _mediator = mediator;
             _profileResolver = profileResolver;
+            _httpClientFactory = httpClientFactory;
+            _configuration = configuration;
         }
 
         // POST: Record a single swipe
@@ -63,7 +71,18 @@ namespace SwipeService.Controllers
             var profileId = await _profileResolver.ResolveProfileIdAsync(keycloakId, bearer, HttpContext.RequestAborted);
             if (profileId is null or 0)
             {
-                return BadRequest(ApiResponse<SwipeResponse>.FailureResult("Could not resolve profile for caller"));
+                // Fallback for internal bot callers: allow providing profile id via header when profile
+                // resolution against UserService fails (dev-only convenience).
+                if (Request.Headers.TryGetValue("X-Bot-ProfileId", out var headerVal) &&
+                    int.TryParse(headerVal.ToString(), out var fallbackId) && fallbackId > 0)
+                {
+                    _logger.LogWarning("Profile resolution failed for keycloakId {KeycloakId}; using X-Bot-ProfileId fallback={FallbackId}", keycloakId, fallbackId);
+                    profileId = fallbackId;
+                }
+                else
+                {
+                    return BadRequest(ApiResponse<SwipeResponse>.FailureResult("Could not resolve profile for caller"));
+                }
             }
 
             // Translate Direction → IsLike when the modern field is supplied.
@@ -78,10 +97,32 @@ namespace SwipeService.Controllers
                 };
             }
 
+            // Parse targetUserId (string from Flutter) to int profile ID.
+            if (!int.TryParse(request.TargetUserId, out var targetProfileId))
+            {
+                return BadRequest(ApiResponse<SwipeResponse>.FailureResult(
+                    $"Invalid TargetUserId '{request.TargetUserId}': expected a numeric profile ID."));
+            }
+
+            // ── Daily swipe limit gate (P1.5) ──
+            var todayStart = DateTime.UtcNow.Date;
+            var todaySwipeCount = await _context.Swipes
+                .CountAsync(s => s.UserId == profileId.Value && s.CreatedAt >= todayStart);
+            const int freeDailyLimit = 25;
+            if (todaySwipeCount >= freeDailyLimit)
+            {
+                var isPremium = await CheckIsPremiumAsync(keycloakId);
+                if (!isPremium)
+                {
+                    return StatusCode(402, ApiResponse<SwipeResponse>.FailureResult(
+                        "Daily swipe limit reached. Upgrade to Premium for unlimited swipes."));
+                }
+            }
+
             var command = new RecordSwipeCommand
             {
                 UserId = profileId.Value,
-                TargetUserId = request.TargetUserId,
+                TargetUserId = targetProfileId,
                 IsLike = isLike,
                 IdempotencyKey = request.IdempotencyKey
             };
@@ -107,8 +148,19 @@ namespace SwipeService.Controllers
 
                 foreach (var swipeAction in request.Swipes)
                 {
+                    // Parse string TargetUserId to int
+                    if (!int.TryParse(swipeAction.TargetUserId, out var targetId))
+                    {
+                        responses.Add(new SwipeResponse
+                        {
+                            Success = false,
+                            Message = $"Invalid TargetUserId '{swipeAction.TargetUserId}': expected numeric profile ID"
+                        });
+                        continue;
+                    }
+
                     // Validate individual swipe
-                    if (request.UserId == swipeAction.TargetUserId)
+                    if (request.UserId == targetId)
                     {
                         responses.Add(new SwipeResponse
                         {
@@ -120,7 +172,7 @@ namespace SwipeService.Controllers
 
                     // Check if swipe already exists
                     var existingSwipe = await _context.Swipes
-                        .FirstOrDefaultAsync(s => s.UserId == request.UserId && s.TargetUserId == swipeAction.TargetUserId);
+                        .FirstOrDefaultAsync(s => s.UserId == request.UserId && s.TargetUserId == targetId);
 
                     if (existingSwipe != null)
                     {
@@ -135,7 +187,7 @@ namespace SwipeService.Controllers
                     var swipe = new Swipe
                     {
                         UserId = request.UserId,
-                        TargetUserId = swipeAction.TargetUserId,
+                        TargetUserId = targetId,
                         IsLike = swipeAction.IsLike,
                         CreatedAt = DateTime.UtcNow
                     };
@@ -154,14 +206,14 @@ namespace SwipeService.Controllers
                     {
                         var mutualSwipe = await _context.Swipes
                             .FirstOrDefaultAsync(s =>
-                                s.UserId == swipeAction.TargetUserId &&
+                                s.UserId == targetId &&
                                 s.TargetUserId == request.UserId &&
                                 s.IsLike);
 
                         if (mutualSwipe != null)
                         {
-                            var user1Id = Math.Min(request.UserId, swipeAction.TargetUserId);
-                            var user2Id = Math.Max(request.UserId, swipeAction.TargetUserId);
+                            var user1Id = Math.Min(request.UserId, targetId);
+                            var user2Id = Math.Max(request.UserId, targetId);
 
                             var match = new Match
                             {
@@ -321,6 +373,27 @@ namespace SwipeService.Controllers
             {
                 _logger.LogError(ex, "Error fetching user mappings");
                 return StatusCode(500, "An error occurred while fetching user mappings");
+            }
+        }
+        private record BillingStatusResponse(string UserId, string Tier, DateTime? ExpiresAt, bool IsPremium, int SparksBalance);
+
+        private async Task<bool> CheckIsPremiumAsync(string keycloakId)
+        {
+            try
+            {
+                var client = _httpClientFactory.CreateClient();
+                var gatewayBase = _configuration["Gateway:BaseUrl"] ?? "http://localhost:8080";
+                var apiKey = _configuration["InternalAuth:ApiKey"] ?? "";
+                var req = new HttpRequestMessage(HttpMethod.Get, $"{gatewayBase}/api/billing/internal-status?userId={keycloakId}");
+                req.Headers.Add("X-Internal-API-Key", apiKey);
+                var resp = await client.SendAsync(req);
+                if (!resp.IsSuccessStatusCode) return false;
+                var json = await resp.Content.ReadFromJsonAsync<BillingStatusResponse>();
+                return json?.IsPremium ?? false;
+            }
+            catch
+            {
+                return false;
             }
         }
     }

@@ -4,7 +4,9 @@ using Moq;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Configuration;
 using MediatR;
+using System.Net.Http;
 using SwipeService.Controllers;
 using SwipeService.Data;
 using SwipeService.Services;
@@ -28,6 +30,8 @@ public class SwipesControllerDiagnosticExample : IDisposable
     private readonly Mock<ILogger<SwipesController>> _mockLogger;
     private readonly Mock<IMediator> _mockMediator;
     private readonly Mock<IUserProfileResolver> _mockResolver;
+    private readonly Mock<IHttpClientFactory> _mockHttpClientFactory;
+    private readonly Mock<IConfiguration> _mockConfiguration;
     private readonly SwipesController _controller;
     private readonly ITestOutputHelper _output;
 
@@ -48,7 +52,9 @@ public class SwipesControllerDiagnosticExample : IDisposable
         _mockResolver
             .Setup(r => r.ResolveProfileIdAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(1);
-        _controller = new SwipesController(_context, _mockNotifier.Object, _mockLogger.Object, _mockMediator.Object, _mockResolver.Object);
+        _mockHttpClientFactory = new Mock<IHttpClientFactory>();
+        _mockConfiguration = new Mock<IConfiguration>();
+        _controller = new SwipesController(_context, _mockNotifier.Object, _mockLogger.Object, _mockMediator.Object, _mockResolver.Object, _mockHttpClientFactory.Object, _mockConfiguration.Object);
 
         var claims = new[] { new Claim("sub", "test-keycloak-1") };
         var identity = new ClaimsIdentity(claims, "TestAuth");
@@ -99,7 +105,7 @@ public class SwipesControllerDiagnosticExample : IDisposable
         var request = new SwipeRequest 
         { 
             UserId = 1, 
-            TargetUserId = 2, 
+            TargetUserId = "2", 
             IsLike = true 
         };
 
@@ -185,7 +191,7 @@ public class SwipesControllerDiagnosticExample : IDisposable
         var request = new SwipeRequest
         {
             UserId = 2,
-            TargetUserId = 1,
+            TargetUserId = "1",
             IsLike = true
         };
 
@@ -253,7 +259,7 @@ public class SwipesControllerDiagnosticExample : IDisposable
         var request = new SwipeRequest
         {
             UserId = 1,
-            TargetUserId = 1,
+            TargetUserId = "1",
             IsLike = true
         };
 

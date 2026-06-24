@@ -3,7 +3,9 @@ using Moq;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Configuration;
 using MediatR;
+using System.Net.Http;
 using SwipeService.Controllers;
 using SwipeService.Data;
 using SwipeService.Services;
@@ -28,6 +30,8 @@ public class SwipesControllerErrorTests : IDisposable
     private readonly Mock<ILogger<SwipesController>> _mockLogger;
     private readonly Mock<IMediator> _mockMediator;
     private readonly Mock<IUserProfileResolver> _mockResolver;
+    private readonly Mock<IHttpClientFactory> _mockHttpClientFactory;
+    private readonly Mock<IConfiguration> _mockConfiguration;
     private readonly SwipesController _controller;
 
     public SwipesControllerErrorTests()
@@ -45,7 +49,9 @@ public class SwipesControllerErrorTests : IDisposable
         _mockResolver
             .Setup(r => r.ResolveProfileIdAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(1);
-        _controller = new SwipesController(_context, _mockNotifier.Object, _mockLogger.Object, _mockMediator.Object, _mockResolver.Object);
+        _mockHttpClientFactory = new Mock<IHttpClientFactory>();
+        _mockConfiguration = new Mock<IConfiguration>();
+        _controller = new SwipesController(_context, _mockNotifier.Object, _mockLogger.Object, _mockMediator.Object, _mockResolver.Object, _mockHttpClientFactory.Object, _mockConfiguration.Object);
 
         var claims = new[] { new Claim("sub", "test-keycloak-1") };
         var identity = new ClaimsIdentity(claims, "TestAuth");
@@ -70,7 +76,7 @@ public class SwipesControllerErrorTests : IDisposable
             .Setup(m => m.Send(It.IsAny<RecordSwipeCommand>(), default))
             .ThrowsAsync(new DbUpdateException("Database connection failed"));
 
-        var request = new SwipeRequest { UserId = 1, TargetUserId = 2, IsLike = true };
+        var request = new SwipeRequest { UserId = 1, TargetUserId = "2", IsLike = true };
 
         // Act & Assert - Should propagate exception (let middleware handle)
         await Assert.ThrowsAsync<DbUpdateException>(async () => await _controller.Swipe(request));
@@ -85,8 +91,8 @@ public class SwipesControllerErrorTests : IDisposable
             UserId = 1,
             Swipes = new List<SwipeAction>
             {
-                new SwipeAction { TargetUserId = 2, IsLike = true },
-                new SwipeAction { TargetUserId = 3, IsLike = true }
+                new SwipeAction { TargetUserId = "2", IsLike = true },
+                new SwipeAction { TargetUserId = "3", IsLike = true }
             }
         };
 
@@ -203,8 +209,8 @@ public class SwipesControllerErrorTests : IDisposable
             UserId = 1,
             Swipes = new List<SwipeAction>
             {
-                new SwipeAction { TargetUserId = 2, IsLike = true },
-                new SwipeAction { TargetUserId = 3, IsLike = false }
+                new SwipeAction { TargetUserId = "2", IsLike = true },
+                new SwipeAction { TargetUserId = "3", IsLike = false }
             }
         };
 
@@ -213,8 +219,8 @@ public class SwipesControllerErrorTests : IDisposable
             UserId = 1,
             Swipes = new List<SwipeAction>
             {
-                new SwipeAction { TargetUserId = 2, IsLike = false }, // Same target, different direction
-                new SwipeAction { TargetUserId = 4, IsLike = true }
+                new SwipeAction { TargetUserId = "2", IsLike = false }, // Same target, different direction
+                new SwipeAction { TargetUserId = "4", IsLike = true }
             }
         };
 
@@ -358,7 +364,7 @@ public class SwipesControllerErrorTests : IDisposable
     {
         // Arrange - Large batch (e.g., 100 swipes)
         var largeSwipeList = Enumerable.Range(2, 100)
-            .Select(i => new SwipeAction { TargetUserId = i, IsLike = i % 2 == 0 })
+            .Select(i => new SwipeAction { TargetUserId = i.ToString(), IsLike = i % 2 == 0 })
             .ToList();
 
         var request = new BatchSwipeRequest
@@ -416,9 +422,9 @@ public class SwipesControllerErrorTests : IDisposable
             UserId = 1,
             Swipes = new List<SwipeAction>
             {
-                new SwipeAction { TargetUserId = 1, IsLike = true },
-                new SwipeAction { TargetUserId = 1, IsLike = false },
-                new SwipeAction { TargetUserId = 1, IsLike = true }
+                new SwipeAction { TargetUserId = "1", IsLike = true },
+                new SwipeAction { TargetUserId = "1", IsLike = false },
+                new SwipeAction { TargetUserId = "1", IsLike = true }
             }
         };
 
