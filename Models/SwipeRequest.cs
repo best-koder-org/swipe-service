@@ -4,14 +4,34 @@ namespace SwipeService.Models
 {
     public class SwipeRequest
     {
-        [Required]
+        /// <summary>
+        /// Legacy field. When the request is authenticated via JWT, this value is
+        /// ignored and overwritten with the profile id resolved from the JWT
+        /// <c>sub</c> claim. Kept for backwards compatibility with internal callers
+        /// (e.g. bot-service) that don't carry an end-user JWT.
+        /// </summary>
         public int UserId { get; set; }
 
+        /// <summary>
+        /// Target user's profile ID as a string. The Flutter client sends this value
+        /// as a string (e.g. "3") because the candidate list returns it that way.
+        /// The controller parses it to <c>int</c> before passing to the command handler.
+        /// Internal callers (bot-service) also send strings.
+        /// </summary>
         [Required]
-        public int TargetUserId { get; set; }
+        public string TargetUserId { get; set; } = string.Empty;
 
-        [Required]
+        /// <summary>
+        /// Legacy boolean flag. Deserialized when the modern <see cref="Direction"/>
+        /// field is absent.
+        /// </summary>
         public bool IsLike { get; set; }
+
+        /// <summary>
+        /// Modern client contract: "like", "pass", "superlike". Case-insensitive.
+        /// When present, takes precedence over <see cref="IsLike"/>.
+        /// </summary>
+        public string? Direction { get; set; }
 
         /// <summary>
         /// Optional idempotency key for retry safety. If provided, duplicate requests with the same key
@@ -36,8 +56,11 @@ namespace SwipeService.Models
 
     public class SwipeAction
     {
+        /// <summary>
+        /// Target user's profile ID as a string. Parsed to <c>int</c> by the controller.
+        /// </summary>
         [Required]
-        public int TargetUserId { get; set; }
+        public string TargetUserId { get; set; } = string.Empty;
 
         [Required]
         public bool IsLike { get; set; }

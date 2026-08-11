@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.IdentityModel.Tokens;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace SwipeService.Extensions
 {
@@ -47,8 +48,22 @@ namespace SwipeService.Extensions
                     ValidAudiences = audiences,
                     ValidateIssuerSigningKey = true,
                     ValidateLifetime = true,
+                    ClockSkew = TimeSpan.FromMinutes(5),
                     NameClaimType = "preferred_username",
                     RoleClaimType = "roles"
+                };
+
+                options.Events = new JwtBearerEvents
+                {
+                    OnMessageReceived = ctx =>
+                    {
+                        var hdr = ctx.Request.Headers["Authorization"].ToString();
+                        if (hdr.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+                        {
+                            ctx.Token = hdr.Substring(7).Trim();
+                        }
+                        return System.Threading.Tasks.Task.CompletedTask;
+                    }
                 };
 
                 configure?.Invoke(options);

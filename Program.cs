@@ -115,6 +115,15 @@ builder.Services.AddTransient<InternalApiKeyAuthHandler>();
 builder.Services.AddHttpClient<MatchmakingNotifier>()
     .AddHttpMessageHandler<InternalApiKeyAuthHandler>();
 
+// Register UserProfileResolver: HTTP-backed lookup keycloakId → profileId.
+// Base URL comes from configuration (UserService:BaseUrl), with localhost fallback.
+var userServiceBaseUrl = builder.Configuration["UserService:BaseUrl"] ?? "http://localhost:8082";
+builder.Services.AddHttpClient<IUserProfileResolver, UserProfileResolver>(client =>
+{
+    client.BaseAddress = new Uri(userServiceBaseUrl.TrimEnd('/') + "/");
+    client.Timeout = TimeSpan.FromSeconds(5);
+});
+
 // Add CQRS with MediatR
 builder.Services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(Assembly.GetExecutingAssembly()));
 
@@ -162,6 +171,28 @@ builder.Services.AddOpenTelemetry()
 // Register injectable business metrics
 builder.Services.AddSingleton<SwipeService.Metrics.SwipeServiceMetrics>();
 
+// CORS: config-driven origins — AllowAnyOrigin in dev, restricted in staging/production
+var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>();
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowAll", policy =>
+    {
+        if (allowedOrigins != null && allowedOrigins.Length > 0)
+        {
+            policy.WithOrigins(allowedOrigins)
+                  .AllowAnyMethod()
+                  .AllowAnyHeader()
+                  .AllowCredentials();
+        }
+        else
+        {
+            policy.AllowAnyOrigin()
+                  .AllowAnyMethod()
+                  .AllowAnyHeader();
+        }
+    });
+});
+
 var app = builder.Build();
 
 // Apply migrations on startup
@@ -195,6 +226,7 @@ app.UseHttpsRedirection();
 
 app.UseCorrelationIds();
 app.UseGlobalExceptionHandling();
+app.UseCors("AllowAll");
 app.UseAuthentication();
 app.UseAuthorization();
 
