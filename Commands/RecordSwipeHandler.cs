@@ -119,7 +119,8 @@ public class RecordSwipeHandler : IRequestHandler<RecordSwipeCommand, Result<Swi
                 TargetUserId = request.TargetUserId,
                 IsLike = request.IsLike,
                 CreatedAt = DateTime.UtcNow,
-                IdempotencyKey = request.IdempotencyKey
+                IdempotencyKey = request.IdempotencyKey,
+                IsBotGenerated = request.IsBotGenerated
             };
 
             _context.Swipes.Add(swipe);
@@ -172,7 +173,9 @@ public class RecordSwipeHandler : IRequestHandler<RecordSwipeCommand, Result<Swi
                     {
                         User1Id = user1Id,
                         User2Id = user2Id,
-                        CreatedAt = DateTime.UtcNow
+                        CreatedAt = DateTime.UtcNow,
+                        // A match is bot-generated if either participant is a bot
+                        IsBotGenerated = request.IsBotGenerated || mutualSwipe.IsBotGenerated
                     };
 
                     _context.Matches.Add(match);

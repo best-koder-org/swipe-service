@@ -61,4 +61,50 @@ public class AdminControllerTests : IDisposable
         var status = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status403Forbidden, status.StatusCode);
     }
+
+    [Fact]
+    public async Task ResetBotSwipes_DeletesOnlyBotDataInDev()
+    {
+        _context.Swipes.AddRange(
+            new Swipe { UserId = 1, TargetUserId = 2, IsLike = true, IsBotGenerated = true, CreatedAt = DateTime.UtcNow },
+            new Swipe { UserId = 2, TargetUserId = 1, IsLike = false, IsBotGenerated = true, CreatedAt = DateTime.UtcNow },
+            new Swipe { UserId = 99, TargetUserId = 98, IsLike = true, IsBotGenerated = false, CreatedAt = DateTime.UtcNow });
+        _context.Matches.AddRange(
+            new SwipeMatch { User1Id = 1, User2Id = 2, IsActive = true, IsBotGenerated = true, CreatedAt = DateTime.UtcNow },
+            new SwipeMatch { User1Id = 99, User2Id = 98, IsActive = true, IsBotGenerated = false, CreatedAt = DateTime.UtcNow });
+        await _context.SaveChangesAsync();
+
+        var result = await BuildController("Development").ResetBotSwipes();
+
+        Assert.IsType<OkObjectResult>(result);
+        Assert.Equal(1, await _context.Swipes.CountAsync());
+        Assert.Equal(1, await _context.Matches.CountAsync());
+        Assert.All(await _context.Swipes.ToListAsync(), s => Assert.False(s.IsBotGenerated));
+        Assert.All(await _context.Matches.ToListAsync(), m => Assert.False(m.IsBotGenerated));
+    }
+
+    [Fact]
+    public async Task ResetBotSwipes_RejectsInProduction()
+    {
+        var result = await BuildController("Production").ResetBotSwipes();
+        var status = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status403Forbidden, status.StatusCode);
+    }
+
+    [Fact]
+    public async Task ResetBotSwipes_HonorsOlderThanHours()
+    {
+        _context.Swipes.AddRange(
+            new Swipe { UserId = 1, TargetUserId = 2, IsLike = true, IsBotGenerated = true, CreatedAt = DateTime.UtcNow.AddHours(-30) },
+            new Swipe { UserId = 2, TargetUserId = 1, IsLike = true, IsBotGenerated = true, CreatedAt = DateTime.UtcNow });
+        await _context.SaveChangesAsync();
+
+        var result = await BuildController("Development").ResetBotSwipes(olderThanHours: 24);
+
+        Assert.IsType<OkObjectResult>(result);
+        // Only the stale (30h old) bot swipe is purged; the fresh one survives.
+        var remaining = await _context.Swipes.ToListAsync();
+        Assert.Single(remaining);
+        Assert.Equal(2, remaining[0].UserId);
+    }
 }

@@ -72,6 +72,36 @@ public class SwipesControllerTests : IDisposable
     // ==================== SWIPE VALIDATION TESTS ====================
 
     [Fact]
+    public async Task Swipe_ExistingStaleMapping_DoesNotModifyKeyOrCorruptTracker()
+    {
+        // Regression: a swiper whose Keycloak-ID already maps to a DIFFERENT profile must not
+        // have the ProfileId key modified (EF throws "part of a key") and must not leave the
+        // change tracker in a faulted state that breaks the subsequent swipe save.
+        _context.UserProfileMappings.Add(new UserProfileMapping
+        {
+            UserId = "test-keycloak-1",
+            ProfileId = 999 // stale mapping for the authenticated swiper
+        });
+        await _context.SaveChangesAsync();
+
+        _mockMediator
+            .Setup(m => m.Send(It.IsAny<RecordSwipeCommand>(), default))
+            .ReturnsAsync(Result<SwipeResponse>.Success(
+                new SwipeResponse { Success = true, Message = "Swipe recorded", IsMutualMatch = false }));
+
+        var request = new SwipeRequest { UserId = 1, TargetUserId = "2", IsLike = true };
+
+        var result = await _controller.Swipe(request);
+
+        Assert.IsType<OkObjectResult>(result);
+        // The stale mapping's key must be untouched.
+        var mapping = await _context.UserProfileMappings.FirstAsync(m => m.UserId == "test-keycloak-1");
+        Assert.Equal(999, mapping.ProfileId);
+        // No tracked entity may be left in a Modified state (would break later saves).
+        Assert.All(_context.ChangeTracker.Entries(), e => Assert.NotEqual(EntityState.Modified, e.State));
+    }
+
+    [Fact]
     public async Task Swipe_ValidRequest_ReturnsOk()
     {
         // Arrange

@@ -85,6 +85,10 @@ namespace SwipeService.Controllers
                 }
             }
 
+            // Self-healing: ensure the swiper has a profile mapping so the messaging
+            // match check (MatchCheckController) can resolve this user later.
+            await EnsureUserMappingAsync(keycloakId, profileId.Value, HttpContext.RequestAborted);
+
             // Translate Direction → IsLike when the modern field is supplied.
             var isLike = request.IsLike;
             if (!string.IsNullOrWhiteSpace(request.Direction))
@@ -96,6 +100,10 @@ namespace SwipeService.Controllers
                     _ => request.IsLike,
                 };
             }
+
+            // Bot-generated swipes carry the X-Bot-ProfileId header (bot-service always sends it).
+            // Stamp the row so the targeted bot-data purge can identify it.
+            var isBotGenerated = Request.Headers.ContainsKey("X-Bot-ProfileId");
 
             // Parse targetUserId (string from Flutter) to int profile ID.
             if (!int.TryParse(request.TargetUserId, out var targetProfileId))
@@ -124,7 +132,8 @@ namespace SwipeService.Controllers
                 UserId = profileId.Value,
                 TargetUserId = targetProfileId,
                 IsLike = isLike,
-                IdempotencyKey = request.IdempotencyKey
+                IdempotencyKey = request.IdempotencyKey,
+                IsBotGenerated = isBotGenerated
             };
 
             var result = await _mediator.Send(command);
@@ -377,6 +386,56 @@ namespace SwipeService.Controllers
         }
         private record BillingStatusResponse(string UserId, string Tier, DateTime? ExpiresAt, bool IsPremium, int SparksBalance);
 
+        /// <summary>
+        /// Upsert the Keycloak-ID → Profile-ID mapping used by the messaging match check.
+        /// Keeps the table self-healing for newly created profiles (humans + bots).
+        /// ProfileId is the entity key, so it is NEVER modified — only missing mappings are
+        /// inserted. Any failure is contained and the change tracker is reset so a failed
+        /// upsert can never break the subsequent swipe save.
+        /// </summary>
+        private async Task EnsureUserMappingAsync(string keycloakId, int profileId, CancellationToken ct)
+        {
+            try
+            {
+                var existing = await _context.UserProfileMappings
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(m => m.UserId == keycloakId, ct);
+                if (existing != null)
+                {
+                    if (existing.ProfileId != profileId)
+                    {
+                        _logger.LogDebug(
+                            "Mapping for {KeycloakId} already points to profile {Old}, ignoring {New}",
+                            keycloakId, existing.ProfileId, profileId);
+                    }
+                    return; // never modify the key
+                }
+
+                // Avoid adding a row whose ProfileId key is already claimed.
+                var byKey = await _context.UserProfileMappings
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(m => m.ProfileId == profileId, ct);
+                if (byKey != null)
+                {
+                    _logger.LogDebug("Profile {ProfileId} already mapped; skipping upsert", profileId);
+                    return;
+                }
+
+                _context.UserProfileMappings.Add(new UserProfileMapping
+                {
+                    UserId = keycloakId,
+                    ProfileId = profileId
+                });
+                await _context.SaveChangesAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not upsert profile mapping for {KeycloakId}", keycloakId);
+                // Reset the tracker so the swipe save below can never see a faulted entity.
+                _context.ChangeTracker.Clear();
+            }
+        }
+
         private async Task<bool> CheckIsPremiumAsync(string keycloakId)
         {
             try
@@ -394,24 +453,6 @@ namespace SwipeService.Controllers
             catch
             {
                 return false;
-            }
-        }
-
-        // GET: Get user profile mappings (ProfileId <-> Keycloak UUID)
-        [HttpGet("user-mappings")]
-        public async Task<IActionResult> GetUserMappings()
-        {
-            try
-            {
-                var mappings = await _context.UserProfileMappings
-                    .Select(m => new { m.ProfileId, KeycloakUserId = m.UserId.ToString() })
-                    .ToListAsync();
-                return Ok(ApiResponse<object>.SuccessResult(mappings));
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error fetching user mappings");
-                return StatusCode(500, "An error occurred while fetching user mappings");
             }
         }
     }
